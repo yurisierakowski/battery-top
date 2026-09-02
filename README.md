@@ -107,8 +107,28 @@ gcc -O2 -Wall -o battery-top battery-top.c -lncurses
 
 ### Debian package
 
-A `.deb` is built automatically by CI for every push and tagged release --
-grab it from the [Releases page](https://github.com/yurisierakowski/battery-top/releases)
+#### apt repository (recommended)
+
+Every tagged release publishes a small signed APT repository via GitHub
+Pages, so regular `apt` commands work:
+
+```
+curl -fsSL https://yurisierakowski.github.io/battery-top/battery-top-archive-keyring.gpg | \
+  sudo tee /usr/share/keyrings/battery-top-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/battery-top-archive-keyring.gpg] https://yurisierakowski.github.io/battery-top/ ./" | \
+  sudo tee /etc/apt/sources.list.d/battery-top.list
+
+sudo apt-get update
+sudo apt-get install battery-top
+```
+
+Signing key fingerprint (for manual verification):
+`CDBB 59B1 7D5E 0DD1 E2E3  CBB2 1A32 A2F5 5280 1ACC`.
+
+#### One-off .deb
+
+A `.deb` is also built automatically by CI for every push and tagged
+release -- grab it from the [Releases page](https://github.com/yurisierakowski/battery-top/releases)
 or a workflow run, then:
 
 ```

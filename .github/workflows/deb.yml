@@ -46,3 +46,63 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/battery-top_*.deb
+
+  # Publishes a minimal signed "flat" APT repository (single directory, no
+  # dists/pool hierarchy) to GitHub Pages, so `apt-get install battery-top`
+  # works after adding the repo -- see README.md for the sources.list line.
+  # Runs only for tagged releases; every tag replaces the repo with just
+  # that version, so apt always points at the latest release.
+  publish-apt-repo:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: battery-top-deb
+          path: repo
+
+      - name: Install repo-building tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils gnupg
+
+      - name: Build and sign repository metadata
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+
+          cd repo
+          # Public key, in both forms users need: dearmored for
+          # /usr/share/keyrings (apt's [signed-by=] option), armored for
+          # anyone who wants to inspect/import it manually.
+          gpg --export "$KEYID" > battery-top-archive-keyring.gpg
+          gpg --armor --export "$KEYID" > battery-top-archive-keyring.asc
+
+          apt-ftparchive packages . > Packages
+          gzip -9c Packages > Packages.gz
+          apt-ftparchive -o APT::FTPArchive::Release::Origin=battery-top \
+                          -o APT::FTPArchive::Release::Label=battery-top \
+                          -o APT::FTPArchive::Release::Description="battery-top APT repository" \
+                          release . > Release
+
+          gpg --batch --yes --default-key "$KEYID" --clearsign -o InRelease Release
+          gpg --batch --yes --default-key "$KEYID" --detach-sign -o Release.gpg Release
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

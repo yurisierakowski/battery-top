@@ -74,8 +74,6 @@ typedef struct {
     char cpu_model[256];
     int  cpu_threads;
     char gpu[256];
-    char shell[128];
-    char pkgs[64];
 } sysinfo_t;
 
 static void run_capture(const char *cmd, char *buf, size_t n) {
@@ -174,30 +172,6 @@ static void cache_system_info(sysinfo_t *s) {
     run_capture("lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -1 | cut -d: -f3-", s->gpu, sizeof(s->gpu));
     if (!s->gpu[0]) strcpy(s->gpu, "unknown");
     trim(s->gpu);
-
-    const char *shell = getenv("SHELL");
-    if (!shell) shell = "/bin/sh";
-    strncpy(s->shell, shell, sizeof(s->shell) - 1);
-
-    strcpy(s->pkgs, "n/a");
-    char out[32];
-    if (!system("command -v dpkg-query >/dev/null 2>&1")) {
-        run_capture("dpkg-query -f '.\\n' -W 2>/dev/null | wc -l", out, sizeof(out));
-        if (out[0]) snprintf(s->pkgs, sizeof(s->pkgs), "%s (dpkg)", out);
-    } else if (!system("command -v rpm >/dev/null 2>&1")) {
-        run_capture("rpm -qa 2>/dev/null | wc -l", out, sizeof(out));
-        if (out[0]) snprintf(s->pkgs, sizeof(s->pkgs), "%s (rpm)", out);
-    } else if (!system("command -v pacman >/dev/null 2>&1")) {
-        run_capture("pacman -Qq 2>/dev/null | wc -l", out, sizeof(out));
-        if (out[0]) snprintf(s->pkgs, sizeof(s->pkgs), "%s (pacman)", out);
-    } else if (!system("command -v apk >/dev/null 2>&1")) {
-        run_capture("apk info 2>/dev/null | wc -l", out, sizeof(out));
-        if (out[0]) snprintf(s->pkgs, sizeof(s->pkgs), "%s (apk)", out);
-    } else if (!system("command -v equery >/dev/null 2>&1")) {
-        /* Gentoo */
-        run_capture("qlist -I 2>/dev/null | wc -l", out, sizeof(out));
-        if (out[0]) snprintf(s->pkgs, sizeof(s->pkgs), "%s (portage)", out);
-    }
 }
 
 /* ---------- CPU utilization ---------- */
@@ -455,6 +429,18 @@ static void cache_net_ifaces(void) {
         if (e->d_name[0] == '.') continue;
         if (!strcmp(e->d_name, "lo")) continue; /* loopback isn't "network" */
 
+        /* Only real hardware NICs: a bridge/veth/vnet/tun interface (Docker,
+         * libvirt, etc.) either has no "device" symlink at all, or that
+         * symlink resolves under .../devices/virtual/net/... A physical NIC
+         * resolves to a real PCI/USB/platform device path instead. */
+        char devpath[350];
+        snprintf(devpath, sizeof(devpath), "/sys/class/net/%s/device", e->d_name);
+        char resolved[512];
+        ssize_t rl = readlink(devpath, resolved, sizeof(resolved) - 1);
+        if (rl < 0) continue;
+        resolved[rl] = '\0';
+        if (strstr(resolved, "/virtual/")) continue;
+
         net_info_t *ni = &g_ifaces[g_nifaces];
         memset(ni, 0, sizeof(*ni));
         #pragma GCC diagnostic push
@@ -478,6 +464,19 @@ static void cache_net_ifaces(void) {
         g_nifaces++;
     }
     closedir(d);
+}
+
+/* "Physically linked" = cable plugged in / radio associated, checked fresh
+ * every refresh (unlike the static hardware attributes above) since it can
+ * change while the program is running. Missing/unreadable is treated as
+ * not linked. */
+static int iface_is_linked(const char *name) {
+    char path[350];
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wformat-truncation"
+    snprintf(path, sizeof(path), "/sys/class/net/%s/carrier", name);
+    #pragma GCC diagnostic pop
+    return read_long(path) == 1;
 }
 
 static int read_net_raw(const char *name, net_raw_t *out) {
@@ -790,7 +789,7 @@ int main(int argc, char **argv) {
          * how many the terminal actually has -- used only to decide whether
          * to show the "not enough rows" warning below. */
         int needed = 2 /* header */
-            + 1 + 10 + 1 /* System: rule + 10 fields + blank */
+            + 1 + 8 + 1 /* System: rule + 8 fields + blank */
             + 1 + (g_ndisks > 0 ? g_ndisks * 4 : 1) + 1 /* Disks */
             + 1 + (g_nifaces > 0 ? g_nifaces + 1 : 1) + 1 /* Network: rule + header row + 1/iface */
             + 1 + 1 + 1 /* CPU: rule + 1 bar + blank */
@@ -830,7 +829,7 @@ int main(int argc, char **argv) {
         struct { const char *k; const char *v; } sysrows[] = {
             {"hostname", sys.hostname}, {"model", sys.model}, {"os", sys.os},
             {"kernel", sys.kernel}, {"uptime", uptime_s}, {"load avg", load_s},
-            {"cpu", sys.cpu_model}, {"gpu", sys.gpu}, {"shell", sys.shell}, {"pkgs", sys.pkgs},
+            {"cpu", sys.cpu_model}, {"gpu", sys.gpu},
         };
         for (size_t i = 0; i < sizeof(sysrows) / sizeof(sysrows[0]) && y < lines - 1; i++, y++) {
             move(y, 0);
@@ -839,6 +838,46 @@ int main(int argc, char **argv) {
             attroff(COLOR_PAIR(CP_DIM));
             printw("%.*s", cols - 13, sysrows[i].v);
             row_border(y, cols);
+        }
+        y++;
+
+        /* CPU Utilization -- one consolidated bar (all cores combined),
+         * same visual style/column as the Memory bars below. */
+        section_rule(&y, cols, "CPU Utilization");
+        int cpu_bar_x = 30;
+        int cpu_bar_w = cols - cpu_bar_x - 2;
+        if (cpu_bar_w < 10) cpu_bar_w = 10;
+        if (y < lines) {
+            cpu_pct_t *p = &g_cpu_pct[0]; /* index 0 = aggregate across all cores */
+            int pct = (int)(p->user_pct + p->sys_pct + p->wait_pct + 0.5);
+            if (pct > 100) pct = 100;
+            move(y, 0);
+            printw("%-10s%3d%% (%d cores)   ", "cpu", pct, g_ncores);
+            draw_simple_bar(y, cpu_bar_x, cpu_bar_w, pct, 1);
+            row_border(y, cols);
+            y++;
+        }
+        y++;
+
+        /* Memory */
+        section_rule(&y, cols, "Memory");
+        if (mem.total_kb > 0 && y < lines) {
+            long used_kb = mem.total_kb - mem.avail_kb;
+            int mem_pct = (int)(100.0 * used_kb / mem.total_kb);
+            move(y, 0);
+            printw("%-10s%6.1fG / %5.1fG  ", "RAM", used_kb / 1024.0 / 1024.0, mem.total_kb / 1024.0 / 1024.0);
+            draw_simple_bar(y, 30, cols - 32, mem_pct, 1);
+            row_border(y, cols);
+            y++;
+        }
+        if (mem.swap_total_kb > 0 && y < lines) {
+            long swap_used = mem.swap_total_kb - mem.swap_free_kb;
+            int swap_pct = (int)(100.0 * swap_used / mem.swap_total_kb);
+            move(y, 0);
+            printw("%-10s%6.1fG / %5.1fG  ", "Swap", swap_used / 1024.0 / 1024.0, mem.swap_total_kb / 1024.0 / 1024.0);
+            draw_simple_bar(y, 30, cols - 32, swap_pct, 1);
+            row_border(y, cols);
+            y++;
         }
         y++;
 
@@ -894,11 +933,13 @@ int main(int argc, char **argv) {
         }
         y++;
 
-        /* Network -- nmon's own I/F table layout */
+        /* Network -- nmon's own I/F table layout. Only physically-linked
+         * interfaces are shown (see the g_ifaces cache and per-refresh
+         * carrier check below). */
         section_rule(&y, cols, "Network");
         if (g_nifaces == 0 && y < lines) {
             move(y, 0);
-            printw("No network interfaces found");
+            printw("No physically linked network interfaces found");
             row_border(y, cols);
             y++;
         }
@@ -912,8 +953,9 @@ int main(int argc, char **argv) {
             row_border(y, cols);
             y++;
         }
-        for (int i = 0; i < g_nifaces && y < lines - 1; i++, y++) {
+        for (int i = 0; i < g_nifaces && y < lines - 1; i++) {
             net_info_t *ni = &g_ifaces[i];
+            if (!iface_is_linked(ni->name)) continue; /* cable/radio not connected right now */
             net_rate_t *r = &g_net_rate[i];
             char label[40];
             #pragma GCC diagnostic push
@@ -924,45 +966,6 @@ int main(int argc, char **argv) {
             printw("%-10s%9.1f %9.1f %8.1f %8.1f %7.0f %7.0f %10.1f %7.1f",
                    label, r->recv_kBps, r->trans_kBps, r->packin, r->packout,
                    r->insize, r->outsize, r->peak_recv_kBps, r->peak_trans_kBps);
-            row_border(y, cols);
-        }
-        y++;
-
-        /* CPU Utilization -- one consolidated bar (all cores combined),
-         * same visual style/column as the Memory bars below. */
-        section_rule(&y, cols, "CPU Utilization");
-        int cpu_bar_x = 30;
-        int cpu_bar_w = cols - cpu_bar_x - 2;
-        if (cpu_bar_w < 10) cpu_bar_w = 10;
-        if (y < lines) {
-            cpu_pct_t *p = &g_cpu_pct[0]; /* index 0 = aggregate across all cores */
-            int pct = (int)(p->user_pct + p->sys_pct + p->wait_pct + 0.5);
-            if (pct > 100) pct = 100;
-            move(y, 0);
-            printw("%-10s%3d%% (%d cores)   ", "cpu", pct, g_ncores);
-            draw_simple_bar(y, cpu_bar_x, cpu_bar_w, pct, 1);
-            row_border(y, cols);
-            y++;
-        }
-        y++;
-
-        /* Memory */
-        section_rule(&y, cols, "Memory");
-        if (mem.total_kb > 0 && y < lines) {
-            long used_kb = mem.total_kb - mem.avail_kb;
-            int mem_pct = (int)(100.0 * used_kb / mem.total_kb);
-            move(y, 0);
-            printw("%-10s%6.1fG / %5.1fG  ", "RAM", used_kb / 1024.0 / 1024.0, mem.total_kb / 1024.0 / 1024.0);
-            draw_simple_bar(y, 30, cols - 32, mem_pct, 1);
-            row_border(y, cols);
-            y++;
-        }
-        if (mem.swap_total_kb > 0 && y < lines) {
-            long swap_used = mem.swap_total_kb - mem.swap_free_kb;
-            int swap_pct = (int)(100.0 * swap_used / mem.swap_total_kb);
-            move(y, 0);
-            printw("%-10s%6.1fG / %5.1fG  ", "Swap", swap_used / 1024.0 / 1024.0, mem.swap_total_kb / 1024.0 / 1024.0);
-            draw_simple_bar(y, 30, cols - 32, swap_pct, 1);
             row_border(y, cols);
             y++;
         }

@@ -13,19 +13,17 @@ kernel    Linux 6.12.100+deb13-amd64                                   |
 uptime    1d 11h 32m    load avg  2.38, 1.80, 1.14                     |
 cpu       Intel(R) Core(TM) i5-10310U CPU @ 1.70GHz (8 threads)        |
 gpu       Intel Corporation CometLake-U GT2 [UHD Graphics] (rev 02)    |
-shell     /bin/bash                                                    |
-pkgs      1906 (dpkg)                                                  |
+CPU Utilization----------------------------------------------------------+
+cpu        24% (8 cores)   ####................                        |
+Memory-------------------------------------------------------------------+
+RAM   13.3G /  15.4G   #####...............                            |
+Swap   2.9G /  12.0G   #...................                            |
 Disks-------------------------------------------------------------------+
 nvme0n1  SSD  NVMe  KINGSTON RBUSNS8154P3256GJ1                        |
 read   0.0 KB/s   0 IOPS   write   0.0 KB/s   0 IOPS   busy   0%       |
 Network-------------------------------------------------------------------+
 I/F Name  Recv=KB/s Trans=KB/s   packin  packout  insize outsize Peak->Recv   Trans|
 wlp0s20f3*     12.3       4.1      9.0      6.0    143    112       88.4     22.7  |
-CPU Utilization----------------------------------------------------------+
-cpu        24% (8 cores)   ####................                        |
-Memory-------------------------------------------------------------------+
-RAM   13.3G /  15.4G   #####...............                            |
-Swap   2.9G /  12.0G   #...................                            |
 Battery------------------------------------------------------------------+
 power source: on battery                                               |
 BAT0  5B10W13906 (Li-poly)                                              |
@@ -44,21 +42,29 @@ Warning: Some statistics may not be visible due to limited number of rows!
 
 ## Features
 
+Panels appear in this order: **System → CPU → Memory → Disks → Network →
+Battery**.
+
 - **System** — FQDN hostname, machine model, OS, kernel, uptime, load
-  average, CPU model, GPU, shell, and installed package count.
+  average, CPU model, and GPU.
+- **CPU** — one consolidated utilization bar (all cores combined), in the
+  same style as the Memory bars, computed live from `/proc/stat` deltas
+  between refreshes (the same technique `top` uses).
+- **Memory** — RAM and swap usage bars.
 - **Disks** — hardware details (model, SSD/HDD, transport) and *live*
   read/write throughput, IOPS, and %busy per physical disk. Deliberately
   shows no space/capacity numbers — this is a hardware + I/O panel, not a
   `df`.
-- **Network** — one row per interface in `nmon`'s own I/F table layout:
-  live receive/transmit KB/s, packets/sec in and out, average packet size,
-  and the peak receive/transmit rate seen since the program started.
-  Wi-Fi interfaces are marked with a trailing `*`. Loopback (`lo`) is
-  skipped.
-- **CPU** — one consolidated utilization bar (all cores combined), in the
-  same style as the Memory bars below it, computed live from `/proc/stat`
-  deltas between refreshes (the same technique `top` uses).
-- **Memory** — RAM and swap usage bars.
+- **Network** — one row per *physically linked* interface, in `nmon`'s own
+  I/F table layout: live receive/transmit KB/s, packets/sec in and out,
+  average packet size, and the peak receive/transmit rate seen since the
+  program started. Wi-Fi interfaces are marked with a trailing `*`.
+  "Physically linked" means two things, both checked live: the interface
+  must be backed by real hardware (a bridge/veth/vnet/tun interface from
+  Docker, libvirt, etc. is excluded, not just loopback), and it must
+  currently have a carrier (cable plugged in / radio associated) —
+  unplug a cable or the interface simply drops off the list on the next
+  refresh.
 - **Battery** — per-battery capacity bar, real-time power draw (W),
   voltage, estimated remaining time, health % (vs. design capacity), cycle
   count, and charge thresholds. Reads only real system batteries
@@ -126,14 +132,17 @@ shared state:
   real `device` symlink are shown, which naturally excludes virtual devices
   like `dm-*`/`md*`/`loop*`); I/O rates come from delta samples of
   `/proc/diskstats`.
-- **Network** — interface list and Wi-Fi detection from `/sys/class/net/*`;
-  throughput/packet/peak rates come from delta samples of `/proc/net/dev`
-  (peaks are tracked in memory and persist for the life of the run).
+- **Network** — interface list from `/sys/class/net/*`, kept only when a
+  `device` symlink resolves to a real (non-`/virtual/`) hardware path, and
+  Wi-Fi is detected via a `wireless`/`phy80211` subdirectory; each refresh
+  also re-checks `carrier` and drops any interface that isn't currently
+  linked. Throughput/packet/peak rates come from delta samples of
+  `/proc/net/dev` (peaks are tracked in memory and persist for the life of
+  the run).
 - **System** — `uname(2)`, `/etc/os-release`, `/proc/cpuinfo`,
   `getaddrinfo()` for the FQDN, DMI (`/sys/class/dmi/id/*`) or
-  `/proc/device-tree/model` for the machine model. GPU name and installed
-  package count are the only two fields that shell out to an external tool
-  (`lspci`, and whichever package manager is present).
+  `/proc/device-tree/model` for the machine model. GPU name is the only
+  field that shells out to an external tool (`lspci`).
 
 ## Compatibility
 
@@ -145,9 +154,9 @@ present, rather than assume one specific machine:
   `/proc/device-tree/model`.
 - `/proc/cpuinfo` without an x86-style `model name` field — tries
   `Hardware`, `Model`, `cpu model`, and `Processor` in turn.
-- No `lspci`, or no recognized package manager (`dpkg`, `rpm`, `pacman`,
-  `apk`, or Portage's `qlist`) — those two fields just show
-  `unknown`/`n/a` instead of failing.
+- No `lspci` — the GPU field just shows `unknown` instead of failing.
+- No network interfaces currently linked, or no physical block devices —
+  each panel says so instead of showing an empty table.
 - Any `/proc/diskstats` kernel version (the format has only ever had
   fields *appended*, never reordered, since the fields this program reads
   were introduced).

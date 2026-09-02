@@ -26,8 +26,12 @@ jobs:
 
       - name: Collect artifacts
         run: |
+          shopt -s nullglob
           mkdir -p dist
-          mv ../battery-top_*.deb ../battery-top-dbgsym_*.deb ../battery-top_*.changes ../battery-top_*.buildinfo dist/
+          mv ../battery-top_*.deb ../battery-top_*.changes ../battery-top_*.buildinfo dist/
+          # dh_strip only emits a separate -dbgsym package when there are
+          # debug symbols to split out; don't fail the build if it didn't.
+          mv ../battery-top-dbgsym_*.deb dist/ 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:

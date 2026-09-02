@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+# The Makefile's own install target only understands PREFIX (+ DESTDIR, which
+# dh_auto_install already sets); point it at the standard FHS prefix instead
+# of its /usr/local default.
+override_dh_auto_install:
+	dh_auto_install -- PREFIX=/usr

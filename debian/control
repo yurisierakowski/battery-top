@@ -1,0 +1,20 @@
+Source: battery-top
+Section: utils
+Priority: optional
+Maintainer: Yuri Sierakowski <yuri.sierakowski@gmail.com>
+Build-Depends: debhelper-compat (= 13), libncurses-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/yurisierakowski/battery-top
+Rules-Requires-Root: no
+
+Package: battery-top
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: nmon-style live dashboard for battery, CPU, memory and disk
+ battery-top is a single, dependency-light ncurses dashboard showing live
+ battery health (capacity, cycle count, charge/discharge rate, remaining
+ time), CPU and memory utilization, per-disk I/O, and linked network
+ interfaces, styled after IBM's nmon.
+ .
+ All data is read straight from /proc and /sys/class/power_supply on every
+ refresh; the tool keeps no state of its own and talks to no other daemon.

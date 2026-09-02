@@ -1,0 +1,5 @@
+battery-top (0.1-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- Yuri Sierakowski <yuri.sierakowski@gmail.com>  Wed, 02 Sep 2026 16:01:21 -0300

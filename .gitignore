@@ -1,3 +1,13 @@
 battery-top
 *.o
 *.out
+
+# Debian packaging build products (debian/rules itself is tracked)
+/debian/battery-top/
+/debian/battery-top-dbgsym/
+/debian/.debhelper/
+/debian/*.substvars
+/debian/*.log
+/debian/files
+/debian/debhelper-build-stamp
+/dist/

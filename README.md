@@ -105,6 +105,24 @@ gcc -O2 -Wall -o battery-top battery-top.c -lncurses
 `make install` installs to `/usr/local/bin` (override with
 `make install PREFIX=~/.local`).
 
+### Debian package
+
+A `.deb` is built automatically by CI for every push and tagged release --
+grab it from the [Releases page](https://github.com/yurisierakowski/battery-top/releases)
+or a workflow run, then:
+
+```
+sudo apt install ./battery-top_*.deb
+```
+
+To build it yourself instead:
+
+```
+sudo apt install debhelper devscripts libncurses-dev
+dpkg-buildpackage -us -uc -b
+sudo apt install ../battery-top_*.deb
+```
+
 ## Usage
 
 ```

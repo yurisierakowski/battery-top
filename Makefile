@@ -14,6 +14,8 @@ clean:
 	rm -f $(TARGET)
 
 # Installs to /usr/local/bin by default. Override with `make install PREFIX=~/.local`.
+# DESTDIR is a staging root prepended to PREFIX (e.g. packaging builds);
+# leave it unset for a normal install straight onto the running system.
 PREFIX ?= /usr/local
 install: $(TARGET)
-	install -Dm755 $(TARGET) $(PREFIX)/bin/$(TARGET)
+	install -Dm755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(TARGET)

@@ -840,12 +840,17 @@ int main(int argc, char **argv) {
     timeout(g_interval * 1000);
 
     while (1) {
-        if (g_resized) {
-            struct winsize ws;
-            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0)
-                resizeterm(ws.ws_row, ws.ws_col);
-            g_resized = 0;
+        /* Query the real terminal size every pass instead of trusting
+         * SIGWINCH alone -- some terminals/multiplexers deliver it late or
+         * not at all, which left the box drawn to a stale, smaller size
+         * than the actual window. This ioctl is cheap enough to just
+         * always do. */
+        struct winsize ws;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0 &&
+            (ws.ws_row != LINES || ws.ws_col != COLS)) {
+            resizeterm(ws.ws_row, ws.ws_col);
         }
+        g_resized = 0;
 
         update_cpu_usage();
         update_disk_io();
@@ -1096,6 +1101,11 @@ int main(int argc, char **argv) {
             row_border(y, cols);
             y++;
         }
+
+        /* Whatever content didn't fill, keep the box sides going down to
+         * the bottom border so the frame always spans the full window
+         * instead of stopping wherever the last section ended. */
+        while (y < lines - 1) blank_row(y++, cols);
 
         /* Box border: title bar on top, warning-or-hint bar on the bottom. */
         draw_top_bar(cols, sys.hostname, g_interval);

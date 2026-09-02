@@ -9,7 +9,7 @@
  *
  * Build:  gcc -O2 -Wall -o battery-top battery-top.c -lncurses
  * Usage:  ./battery-top [-i seconds]
- *         press 'q' to quit.
+ *         press 'q' to quit, 'r' (or space) to refresh immediately.
  */
 
 #define _GNU_SOURCE
@@ -685,22 +685,94 @@ static void draw_simple_bar(int y, int x, int width, int pct, int inverted) {
     attroff(COLOR_PAIR(CP_DIM) | A_DIM);
 }
 
+/* Left/right vertical bars of the outer nmon-style box for one content row.
+ * Every interior row (0 < y < lines-1) gets these; only the top row (title)
+ * and bottom row (footer) get full corners instead -- see draw_top_bar()
+ * and draw_bottom_bar(). */
 static void row_border(int y, int cols) {
-    if (cols > 0) mvaddch(y, cols - 1, '|');
+    if (cols <= 0) return;
+    mvaddch(y, 0, ACS_VLINE);
+    mvaddch(y, cols - 1, ACS_VLINE);
+}
+
+/* A blank interior line still needs the box sides drawn on it, or the
+ * border would show gaps between sections. */
+static void blank_row(int y, int cols) {
+    if (y >= LINES || cols <= 0) return;
+    move(y, 1);
+    for (int i = 1; i < cols - 1; i++) addch(' ');
+    row_border(y, cols);
 }
 
 static void section_rule(int *y, int cols, const char *label) {
     if (*y >= LINES) { (*y)++; return; }
-    move(*y, 0);
+    mvaddch(*y, 0, ACS_VLINE);
+    move(*y, 1);
     attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-    printw("%s", label);
+    printw(" %s ", label);
     attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-    int used = (int)strlen(label);
+    int used = 2 + (int)strlen(label);
     attron(COLOR_PAIR(CP_DIM));
-    for (int i = used; i < cols - 1; i++) addch('-');
+    for (int i = used; i < cols - 2; i++) addch(ACS_HLINE);
     attroff(COLOR_PAIR(CP_DIM));
-    mvaddch(*y, cols - 1, '+');
+    mvaddch(*y, cols - 1, ACS_VLINE);
     (*y)++;
+}
+
+/* Top border of the box, doubling as the title bar (nmon-style):
+ * "<corner>battery-top   Hostname=x   Refresh=Ns------------HH:MM:SS<corner>" */
+static void draw_top_bar(int cols, const char *hostname, int interval) {
+    char timebuf[32];
+    time_t now = time(NULL);
+    strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
+    char left[320];
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wformat-truncation"
+    snprintf(left, sizeof(left), "battery-top   Hostname=%s   Refresh=%ds", hostname, interval);
+    #pragma GCC diagnostic pop
+
+    move(0, 0);
+    attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    addch(ACS_ULCORNER);
+    printw("%s", left);
+    attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    int pad = cols - 1 - (int)strlen(left) - (int)strlen(timebuf) - 1;
+    attron(COLOR_PAIR(CP_DIM));
+    for (int i = 0; i < pad; i++) addch(ACS_HLINE);
+    attroff(COLOR_PAIR(CP_DIM));
+    if (pad >= 0) {
+        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
+        printw("%s", timebuf);
+        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
+    }
+    mvaddch(0, cols - 1, ACS_URCORNER);
+}
+
+/* Bottom border of the box: either the "too small" warning or the normal
+ * refresh/quit hint, rendered as part of the border itself. */
+static void draw_bottom_bar(int lines, int cols, int interval, int show_warning) {
+    if (lines <= 0) return;
+    int y = lines - 1;
+    move(y, 0);
+    addch(ACS_LLCORNER);
+    if (show_warning) {
+        attron(COLOR_PAIR(CP_RED) | A_BOLD);
+        printw("Warning: Some statistics may not be visible due to limited number of rows!");
+        attroff(COLOR_PAIR(CP_RED) | A_BOLD);
+        int used = 1 + (int)strlen("Warning: Some statistics may not be visible due to limited number of rows!");
+        attron(COLOR_PAIR(CP_RED));
+        for (int i = used; i < cols - 1; i++) addch(ACS_HLINE);
+        attroff(COLOR_PAIR(CP_RED));
+    } else {
+        char hint[64];
+        snprintf(hint, sizeof(hint), " refresh: %ds   r = refresh now   q = quit ", interval);
+        attron(COLOR_PAIR(CP_DIM));
+        printw("%s", hint);
+        int used = 1 + (int)strlen(hint);
+        for (int i = used; i < cols - 1; i++) addch(ACS_HLINE);
+        attroff(COLOR_PAIR(CP_DIM));
+    }
+    mvaddch(y, cols - 1, ACS_LRCORNER);
 }
 
 static const char *human_time(long secs, char *buf, size_t n) {
@@ -788,38 +860,17 @@ int main(int argc, char **argv) {
         /* Rough total of rows every section wants to print, regardless of
          * how many the terminal actually has -- used only to decide whether
          * to show the "not enough rows" warning below. */
-        int needed = 2 /* header */
+        int needed = 1 /* top border/title */
             + 1 + 8 + 1 /* System: rule + 8 fields + blank */
             + 1 + (g_ndisks > 0 ? g_ndisks * 4 : 1) + 1 /* Disks */
             + 1 + (g_nifaces > 0 ? g_nifaces + 1 : 1) + 1 /* Network: rule + header row + 1/iface */
             + 1 + 1 + 1 /* CPU: rule + 1 bar + blank */
             + 1 + (mem.total_kb > 0 ? 1 : 0) + (mem.swap_total_kb > 0 ? 1 : 0) + 1 /* Memory */
             + 1 + (ac >= 0 ? 1 : 0) + (nbat > 0 ? nbat * 4 : 1) /* Battery */
-            + 1; /* footer */
+            + 1; /* bottom border/footer */
 
         erase();
-        int y = 0;
-
-        /* header */
-        char timebuf[32];
-        time_t now = time(NULL);
-        strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
-        char left[320];
-        #pragma GCC diagnostic push
-        #pragma GCC diagnostic ignored "-Wformat-truncation"
-        snprintf(left, sizeof(left), "battery-top   Hostname=%s   Refresh=%ds", sys.hostname, g_interval);
-        #pragma GCC diagnostic pop
-        move(y, 0);
-        attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        printw("%s", left);
-        attroff(COLOR_PAIR(CP_TITLE) | A_BOLD);
-        int pad = cols - (int)strlen(left) - (int)strlen(timebuf) - 1;
-        attron(COLOR_PAIR(CP_DIM));
-        for (int i = 0; i < pad; i++) addch('-');
-        attroff(COLOR_PAIR(CP_DIM));
-        if (pad >= 0) printw("%s", timebuf);
-        y++;
-        y++; /* blank */
+        int y = 1; /* row 0 is the top border/title, drawn separately below */
 
         /* System info */
         section_rule(&y, cols, "System");
@@ -832,59 +883,59 @@ int main(int argc, char **argv) {
             {"cpu", sys.cpu_model}, {"gpu", sys.gpu},
         };
         for (size_t i = 0; i < sizeof(sysrows) / sizeof(sysrows[0]) && y < lines - 1; i++, y++) {
-            move(y, 0);
+            move(y, 1);
             attron(COLOR_PAIR(CP_DIM));
             printw("%-10s", sysrows[i].k);
             attroff(COLOR_PAIR(CP_DIM));
-            printw("%.*s", cols - 13, sysrows[i].v);
+            printw("%.*s", cols - 14, sysrows[i].v);
             row_border(y, cols);
         }
-        y++;
+        blank_row(y++, cols);
 
         /* CPU Utilization -- one consolidated bar (all cores combined),
          * same visual style/column as the Memory bars below. */
         section_rule(&y, cols, "CPU Utilization");
-        int cpu_bar_x = 30;
+        int cpu_bar_x = 31;
         int cpu_bar_w = cols - cpu_bar_x - 2;
         if (cpu_bar_w < 10) cpu_bar_w = 10;
         if (y < lines) {
             cpu_pct_t *p = &g_cpu_pct[0]; /* index 0 = aggregate across all cores */
             int pct = (int)(p->user_pct + p->sys_pct + p->wait_pct + 0.5);
             if (pct > 100) pct = 100;
-            move(y, 0);
+            move(y, 1);
             printw("%-10s%3d%% (%d cores)   ", "cpu", pct, g_ncores);
             draw_simple_bar(y, cpu_bar_x, cpu_bar_w, pct, 1);
             row_border(y, cols);
             y++;
         }
-        y++;
+        blank_row(y++, cols);
 
         /* Memory */
         section_rule(&y, cols, "Memory");
         if (mem.total_kb > 0 && y < lines) {
             long used_kb = mem.total_kb - mem.avail_kb;
             int mem_pct = (int)(100.0 * used_kb / mem.total_kb);
-            move(y, 0);
+            move(y, 1);
             printw("%-10s%6.1fG / %5.1fG  ", "RAM", used_kb / 1024.0 / 1024.0, mem.total_kb / 1024.0 / 1024.0);
-            draw_simple_bar(y, 30, cols - 32, mem_pct, 1);
+            draw_simple_bar(y, 31, cols - 33, mem_pct, 1);
             row_border(y, cols);
             y++;
         }
         if (mem.swap_total_kb > 0 && y < lines) {
             long swap_used = mem.swap_total_kb - mem.swap_free_kb;
             int swap_pct = (int)(100.0 * swap_used / mem.swap_total_kb);
-            move(y, 0);
+            move(y, 1);
             printw("%-10s%6.1fG / %5.1fG  ", "Swap", swap_used / 1024.0 / 1024.0, mem.swap_total_kb / 1024.0 / 1024.0);
-            draw_simple_bar(y, 30, cols - 32, swap_pct, 1);
+            draw_simple_bar(y, 31, cols - 33, swap_pct, 1);
             row_border(y, cols);
             y++;
         }
-        y++;
+        blank_row(y++, cols);
 
         /* Disks: hardware + live I/O (no space/usage info) */
         section_rule(&y, cols, "Disks");
         if (g_ndisks == 0 && y < lines) {
-            move(y, 0);
+            move(y, 1);
             printw("No physical block devices found");
             row_border(y, cols);
             y++;
@@ -894,36 +945,36 @@ int main(int argc, char **argv) {
             disk_rate_t *r = &g_disk_rate[i];
             const char *kind = di->rotational == 0 ? "SSD" : di->rotational == 1 ? "HDD" : "?";
 
-            move(y, 0);
+            move(y, 1);
             attron(A_BOLD);
             printw("%-10s", di->name);
             attroff(A_BOLD);
-            printw("%-6s %-9s %.*s", kind, di->transport, cols - 30, di->model);
+            printw("%-6s %-9s %.*s", kind, di->transport, cols - 31, di->model);
             row_border(y, cols);
             y++;
 
             if (y < lines) {
                 char line[128];
                 snprintf(line, sizeof(line), "  read  %8.1f KB/s %6.0f IOPS", r->read_kBps, r->read_iops);
-                move(y, 0);
-                printw("%.*s", cols - 1, line);
+                move(y, 1);
+                printw("%.*s", cols - 2, line);
                 row_border(y, cols);
                 y++;
             }
             if (y < lines) {
                 char line[128];
                 snprintf(line, sizeof(line), "  write %8.1f KB/s %6.0f IOPS", r->write_kBps, r->write_iops);
-                move(y, 0);
-                printw("%.*s", cols - 1, line);
+                move(y, 1);
+                printw("%.*s", cols - 2, line);
                 row_border(y, cols);
                 y++;
             }
             if (y < lines) {
                 int busy = (int)(r->busy_pct + 0.5);
-                int busy_bar_x = 9; /* after "  busy   " */
+                int busy_bar_x = 10; /* after "  busy   " */
                 int busy_bar_w = cols - busy_bar_x - 8;
                 if (busy_bar_w < 6) busy_bar_w = 6;
-                move(y, 0);
+                move(y, 1);
                 printw("  busy");
                 draw_simple_bar(y, busy_bar_x, busy_bar_w, busy, 1);
                 mvprintw(y, busy_bar_x + busy_bar_w + 1, "%3d%%", busy);
@@ -931,20 +982,20 @@ int main(int argc, char **argv) {
                 y++;
             }
         }
-        y++;
+        blank_row(y++, cols);
 
         /* Network -- nmon's own I/F table layout. Only physically-linked
          * interfaces are shown (see the g_ifaces cache and per-refresh
          * carrier check below). */
         section_rule(&y, cols, "Network");
         if (g_nifaces == 0 && y < lines) {
-            move(y, 0);
+            move(y, 1);
             printw("No physically linked network interfaces found");
             row_border(y, cols);
             y++;
         }
         if (g_nifaces > 0 && y < lines) {
-            move(y, 0);
+            move(y, 1);
             attron(COLOR_PAIR(CP_DIM));
             printw("%-10s%9s %9s %8s %8s %7s %7s %10s %7s",
                    "I/F Name", "Recv=KB/s", "Trans=KB/s", "packin", "packout",
@@ -962,19 +1013,19 @@ int main(int argc, char **argv) {
             #pragma GCC diagnostic ignored "-Wformat-truncation"
             snprintf(label, sizeof(label), "%s%s", ni->name, ni->is_wireless ? "*" : "");
             #pragma GCC diagnostic pop
-            move(y, 0);
+            move(y, 1);
             printw("%-10s%9.1f %9.1f %8.1f %8.1f %7.0f %7.0f %10.1f %7.1f",
                    label, r->recv_kBps, r->trans_kBps, r->packin, r->packout,
                    r->insize, r->outsize, r->peak_recv_kBps, r->peak_trans_kBps);
             row_border(y, cols);
             y++;
         }
-        y++;
+        blank_row(y++, cols);
 
         /* Battery */
         section_rule(&y, cols, "Battery");
         if (ac >= 0 && y < lines) {
-            move(y, 0);
+            move(y, 1);
             printw("power source: ");
             attron(COLOR_PAIR(ac ? CP_GREEN : CP_YELLOW) | A_BOLD);
             printw("%s", ac ? "plugged in" : "on battery");
@@ -983,14 +1034,14 @@ int main(int argc, char **argv) {
             y++;
         }
         if (nbat == 0 && y < lines) {
-            move(y, 0);
+            move(y, 1);
             printw("No system battery (BAT*) found");
             row_border(y, cols);
             y++;
         }
         for (int i = 0; i < nbat && y < lines - 4; i++) {
             battery_t *b = &batteries[i];
-            move(y, 0);
+            move(y, 1);
             attron(A_BOLD);
             printw("%s", b->name);
             attroff(A_BOLD);
@@ -998,14 +1049,14 @@ int main(int argc, char **argv) {
             row_border(y, cols);
             y++;
 
-            int batt_bar_w = cols - 5 - 14;
+            int batt_bar_w = cols - 6 - 14;
             if (batt_bar_w < 10) batt_bar_w = 10;
             if (batt_bar_w > 40) batt_bar_w = 40;
 
-            move(y, 0);
+            move(y, 1);
             printw("%3d%% ", b->capacity);
-            draw_simple_bar(y, 5, batt_bar_w, b->capacity, 0);
-            move(y, 5 + batt_bar_w + 1);
+            draw_simple_bar(y, 6, batt_bar_w, b->capacity, 0);
+            move(y, 6 + batt_bar_w + 1);
             int scolor = !strcmp(b->status, "Charging") ? CP_GREEN :
                          !strcmp(b->status, "Full") ? CP_CYAN : CP_YELLOW;
             attron(COLOR_PAIR(scolor));
@@ -1028,7 +1079,7 @@ int main(int argc, char **argv) {
                     snprintf(remaining, sizeof(remaining), "%s to full", tmp);
                 }
             }
-            move(y, 0);
+            move(y, 1);
             if (watts >= 0) printw("draw %.2fW   ", watts); else printw("draw n/a     ");
             if (volts >= 0) printw("voltage %.2fV   ", volts); else printw("voltage n/a       ");
             printw("remaining %s", remaining);
@@ -1037,7 +1088,7 @@ int main(int argc, char **argv) {
 
             double health = (b->energy_full > 0 && b->energy_full_design > 0)
                 ? 100.0 * b->energy_full / b->energy_full_design : -1;
-            move(y, 0);
+            move(y, 1);
             if (health >= 0) printw("health %.1f%%   ", health); else printw("health n/a     ");
             printw("cycles %d", b->cycle_count);
             if (b->start_thresh >= 0 && b->end_thresh >= 0)
@@ -1046,23 +1097,28 @@ int main(int argc, char **argv) {
             y++;
         }
 
-        if (lines > 0) {
-            move(lines - 1, 0);
-            if (needed > lines) {
-                attron(COLOR_PAIR(CP_RED) | A_BOLD);
-                printw("Warning: Some statistics may not be visible due to limited number of rows!");
-                attroff(COLOR_PAIR(CP_RED) | A_BOLD);
-            } else {
-                attron(COLOR_PAIR(CP_DIM));
-                printw("refresh: %ds   q = quit", g_interval);
-                attroff(COLOR_PAIR(CP_DIM));
-            }
-        }
+        /* Box border: title bar on top, warning-or-hint bar on the bottom. */
+        draw_top_bar(cols, sys.hostname, g_interval);
+        draw_bottom_bar(lines, cols, g_interval, needed > lines);
 
         refresh();
 
-        int ch = getch();
-        if (ch == 'q' || ch == 'Q') break;
+        /* Wait for the refresh interval to elapse (getch() returns ERR once
+         * timeout() runs out), or for an explicit request: 'q' quits, and
+         * 'r'/space force an immediate refresh without leaving the app. Any
+         * other keypress is ignored instead of restarting the loop right
+         * away -- previously *any* key made the whole screen redraw at
+         * once, so holding a key down looked like a runaway refresh. */
+        int quit = 0;
+        for (;;) {
+            int ch = getch();
+            if (g_resized) break; /* handle the resize on the next pass */
+            if (ch == ERR) break; /* interval elapsed */
+            if (ch == 'q' || ch == 'Q') { quit = 1; break; }
+            if (ch == 'r' || ch == 'R' || ch == ' ') break; /* refresh now */
+            /* else: ignore and keep waiting */
+        }
+        if (quit) break;
     }
 
     endwin();

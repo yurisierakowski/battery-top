@@ -26,6 +26,7 @@
 #include <sys/ioctl.h>
 #include <netdb.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 #define PS_DIR "/sys/class/power_supply"
 #define MAX_CORES 256
@@ -422,6 +423,136 @@ static void update_disk_io(void) {
     g_prev_disk_valid = 1;
 }
 
+/* ---------- network (nmon-style I/F table) ---------- */
+
+#define MAX_NET_IFACES 16
+
+typedef struct {
+    char name[32];
+    int is_wireless;
+    long speed_mbps; /* -1 if unknown/not applicable */
+} net_info_t;
+
+typedef struct {
+    unsigned long long rx_bytes, rx_packets, tx_bytes, tx_packets;
+} net_raw_t;
+
+typedef struct {
+    double recv_kBps, trans_kBps;
+    double packin, packout;   /* packets/sec */
+    double insize, outsize;   /* avg bytes per packet */
+    double peak_recv_kBps, peak_trans_kBps; /* highest seen this run */
+} net_rate_t;
+
+static net_info_t g_ifaces[MAX_NET_IFACES];
+static int g_nifaces = 0;
+
+static void cache_net_ifaces(void) {
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return;
+    struct dirent *e;
+    while (g_nifaces < MAX_NET_IFACES && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        if (!strcmp(e->d_name, "lo")) continue; /* loopback isn't "network" */
+
+        net_info_t *ni = &g_ifaces[g_nifaces];
+        memset(ni, 0, sizeof(*ni));
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wformat-truncation"
+        snprintf(ni->name, sizeof(ni->name), "%s", e->d_name);
+        #pragma GCC diagnostic pop
+
+        char path[350];
+        snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", e->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0) ni->is_wireless = 1;
+        else {
+            snprintf(path, sizeof(path), "/sys/class/net/%s/phy80211", e->d_name);
+            if (stat(path, &st) == 0) ni->is_wireless = 1;
+        }
+
+        snprintf(path, sizeof(path), "/sys/class/net/%s/speed", e->d_name);
+        long sp = read_long(path);
+        ni->speed_mbps = sp; /* -1 (read fails) if down/not reported */
+
+        g_nifaces++;
+    }
+    closedir(d);
+}
+
+static int read_net_raw(const char *name, net_raw_t *out) {
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) return 0;
+    char line[512];
+    int found = 0;
+    fgets(line, sizeof(line), f); /* header x2 */
+    fgets(line, sizeof(line), f);
+    while (fgets(line, sizeof(line), f)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        char ifname[64];
+        sscanf(line, "%63s", ifname);
+        if (strcmp(ifname, name) != 0) continue;
+
+        unsigned long long rxb, rxp, txb, txp, tmp;
+        int got = sscanf(colon + 1,
+            "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+            &rxb, &rxp, &tmp, &tmp, &tmp, &tmp, &tmp, &tmp, &txb, &txp, &tmp);
+        if (got < 10) continue;
+        out->rx_bytes = rxb; out->rx_packets = rxp;
+        out->tx_bytes = txb; out->tx_packets = txp;
+        found = 1;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+static net_raw_t g_prev_net[MAX_NET_IFACES];
+static struct timespec g_prev_net_ts;
+static int g_prev_net_valid = 0;
+static net_rate_t g_net_rate[MAX_NET_IFACES];
+
+static void update_net_io(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = 0;
+    if (g_prev_net_valid) {
+        elapsed = (now.tv_sec - g_prev_net_ts.tv_sec) +
+                  (now.tv_nsec - g_prev_net_ts.tv_nsec) / 1e9;
+    }
+
+    for (int i = 0; i < g_nifaces; i++) {
+        net_raw_t cur;
+        if (!read_net_raw(g_ifaces[i].name, &cur)) { memset(&g_net_rate[i], 0, sizeof(net_rate_t)); continue; }
+
+        double peak_r = g_net_rate[i].peak_recv_kBps, peak_t = g_net_rate[i].peak_trans_kBps;
+        if (g_prev_net_valid && elapsed > 0) {
+            unsigned long long drxb = cur.rx_bytes - g_prev_net[i].rx_bytes;
+            unsigned long long drxp = cur.rx_packets - g_prev_net[i].rx_packets;
+            unsigned long long dtxb = cur.tx_bytes - g_prev_net[i].tx_bytes;
+            unsigned long long dtxp = cur.tx_packets - g_prev_net[i].tx_packets;
+
+            g_net_rate[i].recv_kBps = (drxb / 1024.0) / elapsed;
+            g_net_rate[i].trans_kBps = (dtxb / 1024.0) / elapsed;
+            g_net_rate[i].packin = drxp / elapsed;
+            g_net_rate[i].packout = dtxp / elapsed;
+            g_net_rate[i].insize = drxp > 0 ? (double)drxb / drxp : 0;
+            g_net_rate[i].outsize = dtxp > 0 ? (double)dtxb / dtxp : 0;
+            if (g_net_rate[i].recv_kBps > peak_r) peak_r = g_net_rate[i].recv_kBps;
+            if (g_net_rate[i].trans_kBps > peak_t) peak_t = g_net_rate[i].trans_kBps;
+        } else {
+            memset(&g_net_rate[i], 0, sizeof(net_rate_t));
+        }
+        g_net_rate[i].peak_recv_kBps = peak_r;
+        g_net_rate[i].peak_trans_kBps = peak_t;
+        g_prev_net[i] = cur;
+    }
+    g_prev_net_ts = now;
+    g_prev_net_valid = 1;
+}
+
 /* ---------- battery ---------- */
 
 typedef struct {
@@ -623,6 +754,7 @@ int main(int argc, char **argv) {
     sysinfo_t sys;
     cache_system_info(&sys);
     cache_disks();
+    cache_net_ifaces();
 
     signal(SIGWINCH, on_winch);
     signal(SIGINT, on_terminate);
@@ -646,12 +778,26 @@ int main(int argc, char **argv) {
 
         update_cpu_usage();
         update_disk_io();
+        update_net_io();
         mem_t mem; read_mem(&mem);
         battery_t batteries[MAX_BATT];
         int nbat = read_batteries(batteries, MAX_BATT);
         int ac = ac_online();
 
         int cols = COLS, lines = LINES;
+
+        /* Rough total of rows every section wants to print, regardless of
+         * how many the terminal actually has -- used only to decide whether
+         * to show the "not enough rows" warning below. */
+        int needed = 2 /* header */
+            + 1 + 10 + 1 /* System: rule + 10 fields + blank */
+            + 1 + (g_ndisks > 0 ? g_ndisks * 4 : 1) + 1 /* Disks */
+            + 1 + (g_nifaces > 0 ? g_nifaces + 1 : 1) + 1 /* Network: rule + header row + 1/iface */
+            + 1 + 1 + 1 /* CPU: rule + 1 bar + blank */
+            + 1 + (mem.total_kb > 0 ? 1 : 0) + (mem.swap_total_kb > 0 ? 1 : 0) + 1 /* Memory */
+            + 1 + (ac >= 0 ? 1 : 0) + (nbat > 0 ? nbat * 4 : 1) /* Battery */
+            + 1; /* footer */
+
         erase();
         int y = 0;
 
@@ -659,8 +805,11 @@ int main(int argc, char **argv) {
         char timebuf[32];
         time_t now = time(NULL);
         strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&now));
-        char left[256];
+        char left[320];
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(left, sizeof(left), "battery-top   Hostname=%s   Refresh=%ds", sys.hostname, g_interval);
+        #pragma GCC diagnostic pop
         move(y, 0);
         attron(COLOR_PAIR(CP_TITLE) | A_BOLD);
         printw("%s", left);
@@ -745,34 +894,53 @@ int main(int argc, char **argv) {
         }
         y++;
 
-        /* CPU Utilization */
-        section_rule(&y, cols, "CPU Utilization");
-        int cpu_bar_x = 9; /* after "cpu 123 " */
-        int cpu_bar_w = cols - cpu_bar_x - 8; /* leave room for " 100%" + border */
-        if (cpu_bar_w < 10) cpu_bar_w = 10;
-
-        for (int c = 1; c <= g_ncores && y < lines - 1; c++, y++) {
-            cpu_pct_t *p = &g_cpu_pct[c];
-            int pct = (int)(p->user_pct + p->sys_pct + p->wait_pct + 0.5);
-            if (pct > 100) pct = 100;
+        /* Network -- nmon's own I/F table layout */
+        section_rule(&y, cols, "Network");
+        if (g_nifaces == 0 && y < lines) {
             move(y, 0);
-            printw("cpu %-3d ", c - 1);
-            draw_simple_bar(y, cpu_bar_x, cpu_bar_w, pct, 1);
-            mvprintw(y, cpu_bar_x + cpu_bar_w + 1, "%3d%%", pct);
+            printw("No network interfaces found");
+            row_border(y, cols);
+            y++;
+        }
+        if (g_nifaces > 0 && y < lines) {
+            move(y, 0);
+            attron(COLOR_PAIR(CP_DIM));
+            printw("%-10s%9s %9s %8s %8s %7s %7s %10s %7s",
+                   "I/F Name", "Recv=KB/s", "Trans=KB/s", "packin", "packout",
+                   "insize", "outsize", "Peak->Recv", "Trans");
+            attroff(COLOR_PAIR(CP_DIM));
+            row_border(y, cols);
+            y++;
+        }
+        for (int i = 0; i < g_nifaces && y < lines - 1; i++, y++) {
+            net_info_t *ni = &g_ifaces[i];
+            net_rate_t *r = &g_net_rate[i];
+            char label[40];
+            #pragma GCC diagnostic push
+            #pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(label, sizeof(label), "%s%s", ni->name, ni->is_wireless ? "*" : "");
+            #pragma GCC diagnostic pop
+            move(y, 0);
+            printw("%-10s%9.1f %9.1f %8.1f %8.1f %7.0f %7.0f %10.1f %7.1f",
+                   label, r->recv_kBps, r->trans_kBps, r->packin, r->packout,
+                   r->insize, r->outsize, r->peak_recv_kBps, r->peak_trans_kBps);
             row_border(y, cols);
         }
+        y++;
+
+        /* CPU Utilization -- one consolidated bar (all cores combined),
+         * same visual style/column as the Memory bars below. */
+        section_rule(&y, cols, "CPU Utilization");
+        int cpu_bar_x = 30;
+        int cpu_bar_w = cols - cpu_bar_x - 2;
+        if (cpu_bar_w < 10) cpu_bar_w = 10;
         if (y < lines) {
-            cpu_pct_t *p = &g_cpu_pct[0];
+            cpu_pct_t *p = &g_cpu_pct[0]; /* index 0 = aggregate across all cores */
             int pct = (int)(p->user_pct + p->sys_pct + p->wait_pct + 0.5);
             if (pct > 100) pct = 100;
             move(y, 0);
-            attron(A_BOLD);
-            printw("avg     ");
-            attroff(A_BOLD);
+            printw("%-10s%3d%% (%d cores)   ", "cpu", pct, g_ncores);
             draw_simple_bar(y, cpu_bar_x, cpu_bar_w, pct, 1);
-            attron(A_BOLD);
-            mvprintw(y, cpu_bar_x + cpu_bar_w + 1, "%3d%%", pct);
-            attroff(A_BOLD);
             row_border(y, cols);
             y++;
         }
@@ -877,9 +1045,15 @@ int main(int argc, char **argv) {
 
         if (lines > 0) {
             move(lines - 1, 0);
-            attron(COLOR_PAIR(CP_DIM));
-            printw("refresh: %ds   q = quit", g_interval);
-            attroff(COLOR_PAIR(CP_DIM));
+            if (needed > lines) {
+                attron(COLOR_PAIR(CP_RED) | A_BOLD);
+                printw("Warning: Some statistics may not be visible due to limited number of rows!");
+                attroff(COLOR_PAIR(CP_RED) | A_BOLD);
+            } else {
+                attron(COLOR_PAIR(CP_DIM));
+                printw("refresh: %ds   q = quit", g_interval);
+                attroff(COLOR_PAIR(CP_DIM));
+            }
         }
 
         refresh();

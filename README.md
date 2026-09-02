@@ -18,10 +18,11 @@ pkgs      1906 (dpkg)                                                  |
 Disks-------------------------------------------------------------------+
 nvme0n1  SSD  NVMe  KINGSTON RBUSNS8154P3256GJ1                        |
 read   0.0 KB/s   0 IOPS   write   0.0 KB/s   0 IOPS   busy   0%       |
+Network-------------------------------------------------------------------+
+I/F Name  Recv=KB/s Trans=KB/s   packin  packout  insize outsize Peak->Recv   Trans|
+wlp0s20f3*     12.3       4.1      9.0      6.0    143    112       88.4     22.7  |
 CPU Utilization----------------------------------------------------------+
-cpu 0    ####................   19%                                    |
-cpu 1    ##..................   12%                                    |
-...
+cpu        24% (8 cores)   ####................                        |
 Memory-------------------------------------------------------------------+
 RAM   13.3G /  15.4G   #####...............                            |
 Swap   2.9G /  12.0G   #...................                            |
@@ -34,6 +35,13 @@ health 92.3%   cycles 110   charge limits 0%-100%                     |
 refresh: 2s   q = quit
 ```
 
+If the terminal is too short to fit every panel, the footer is replaced
+with a warning instead of silently clipping content:
+
+```
+Warning: Some statistics may not be visible due to limited number of rows!
+```
+
 ## Features
 
 - **System** — FQDN hostname, machine model, OS, kernel, uptime, load
@@ -42,8 +50,14 @@ refresh: 2s   q = quit
   read/write throughput, IOPS, and %busy per physical disk. Deliberately
   shows no space/capacity numbers — this is a hardware + I/O panel, not a
   `df`.
-- **CPU** — per-core utilization bars, colored by load, computed live from
-  `/proc/stat` deltas between refreshes (the same technique `top` uses).
+- **Network** — one row per interface in `nmon`'s own I/F table layout:
+  live receive/transmit KB/s, packets/sec in and out, average packet size,
+  and the peak receive/transmit rate seen since the program started.
+  Wi-Fi interfaces are marked with a trailing `*`. Loopback (`lo`) is
+  skipped.
+- **CPU** — one consolidated utilization bar (all cores combined), in the
+  same style as the Memory bars below it, computed live from `/proc/stat`
+  deltas between refreshes (the same technique `top` uses).
 - **Memory** — RAM and swap usage bars.
 - **Battery** — per-battery capacity bar, real-time power draw (W),
   voltage, estimated remaining time, health % (vs. design capacity), cycle
@@ -51,6 +65,9 @@ refresh: 2s   q = quit
   (`/sys/class/power_supply/BAT*`) — a wireless mouse/keyboard reporting
   its own "battery" over HID++ is correctly ignored, since the kernel never
   names those `BAT*`.
+- **Row-limit warning** — if the terminal is too short for every panel to
+  fit, the footer is replaced with an explicit warning rather than quietly
+  clipping content.
 - Flicker-free `ncurses` rendering (only the changed cells are redrawn),
   live terminal-resize handling, `q`/`Q` to quit, and Ctrl+C is caught so
   your terminal is always restored on exit.
@@ -109,6 +126,9 @@ shared state:
   real `device` symlink are shown, which naturally excludes virtual devices
   like `dm-*`/`md*`/`loop*`); I/O rates come from delta samples of
   `/proc/diskstats`.
+- **Network** — interface list and Wi-Fi detection from `/sys/class/net/*`;
+  throughput/packet/peak rates come from delta samples of `/proc/net/dev`
+  (peaks are tracked in memory and persist for the life of the run).
 - **System** — `uname(2)`, `/etc/os-release`, `/proc/cpuinfo`,
   `getaddrinfo()` for the FQDN, DMI (`/sys/class/dmi/id/*`) or
   `/proc/device-tree/model` for the machine model. GPU name and installed
